@@ -2,8 +2,8 @@ import os
 import sys
 
 import numpy as np
-
-sys.path.append(os.getcwd())
+sys.path.append("..")
+#sys.path.append(os.getcwd())
 
 
 def noise_sampler(bs):
