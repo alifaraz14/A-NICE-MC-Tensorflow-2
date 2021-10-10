@@ -1,5 +1,6 @@
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 from a_nice_mc.objectives.expression import Expression
 from a_nice_mc.utils.logger import create_logger
 
@@ -13,7 +14,7 @@ class LordOfRings(Expression):
         self.z = tf.placeholder(tf.float32, [None, 2], name='z')
 
     def __call__(self, z):
-        with tf.variable_scope(self.name):
+        with tf.variable_scope(self.name): #Did not understand this statement
             z1 = tf.reshape(tf.slice(z, [0, 0], [-1, 1]), [-1])
             z2 = tf.reshape(tf.slice(z, [0, 1], [-1, 1]), [-1])
             v1 = (tf.sqrt(z1 * z1 + z2 * z2) - 1) / 0.2
