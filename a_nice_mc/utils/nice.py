@@ -1,4 +1,5 @@
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
 from a_nice_mc.utils.hmc import hamiltonian, metropolis_hastings_accept
 from a_nice_mc.utils.layers import dense
