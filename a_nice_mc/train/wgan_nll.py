@@ -2,7 +2,8 @@ import os
 import time
 
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 from a_nice_mc.utils.bootstrap import Buffer
 from a_nice_mc.utils.logger import create_logger
 from a_nice_mc.utils.nice import TrainingOperator, InferenceOperator
