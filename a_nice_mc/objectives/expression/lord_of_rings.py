@@ -11,7 +11,7 @@ logger = create_logger(__name__)
 class LordOfRings(Expression):
     def __init__(self, name='lord_of_rings', display=True):
         super(LordOfRings, self).__init__(name=name, display=display)
-        self.z = tf.placeholder(tf.float32, [None, 2], name='z')
+        # self.z = tf.placeholder(tf.float32, [None, 2], name='z')
 
     def __call__(self, z):
         with tf.variable_scope(self.name): #Did not understand this statement
@@ -25,13 +25,13 @@ class LordOfRings(Expression):
             p1, p2, p3, p4, p5 = v1 * v1, v2 * v2, v3 * v3, v4 * v4, v5 * v5
             return tf.minimum(tf.minimum(tf.minimum(tf.minimum(p1, p2), p3), p4), p5)
 
-    @staticmethod
-    def mean():
-        return np.array([3.6])
+    # @staticmethod
+    # def mean():
+    #     return np.array([3.6])
 
-    @staticmethod
-    def std():
-        return np.array([1.24])
+    # @staticmethod
+    # def std():
+    #     return np.array([1.24])
 
     @staticmethod
     def xlim():

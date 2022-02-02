@@ -40,6 +40,8 @@ class Trainer(object):
         self.steps = tf.placeholder(tf.int32, [])
         self.nice_steps = tf.placeholder(tf.int32, [])
         bx, bz = tf.shape(self.x)[0], tf.shape(self.z)[0]
+        print("The value of bx is",bx)
+        print("The value of bz is",bz)
 
         # Obtain values from inference ops
         # `infer_op` contains Metropolis step
@@ -104,6 +106,7 @@ class Trainer(object):
         # I don't have a good solution to the tf variable scope mess.
         # So I basically force the NiceLayer to contain the 'generator' scope.
         # See `nice/__init__.py`.
+        print(tf.global_variables)
         g_vars = [var for var in tf.global_variables() if 'generator' in var.name]
         d_vars = [var for var in tf.global_variables() if discriminator.name in var.name]
 
@@ -174,7 +177,7 @@ class Trainer(object):
               hmc_epochs=1):
         """
         Train the NICE proposal using adversarial training.
-        :param d_iters: number of discrtiminator iterations for each generator iteration
+        :param d_iters: number of discriminator iterations for each generator iteration
         :param epoch_size: how many iteration for each bootstrap step
         :param log_freq: how many iterations for each log on screen
         :param max_iters: max number of iterations for training

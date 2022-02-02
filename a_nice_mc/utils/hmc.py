@@ -98,7 +98,8 @@ class HamiltonianMonteCarloSampler(object):
                  sess=False):
         self.energy_fn = energy_fn
         self.prior = prior
-        self.z = self.energy_fn.z
+        # self.z = self.energy_fn.z
+        self.z = tf.placeholder(tf.float32, [None, 2])
         self.stepsize = tf.constant(stepsize)
         self.avg_acceptance_rate = tf.constant(target_acceptance_rate)
         self.sess = sess

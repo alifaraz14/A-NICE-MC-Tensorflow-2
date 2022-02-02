@@ -156,6 +156,7 @@ class InferenceOperator(object):
             v = tf.random_normal(shape=tf.stack([tf.shape(z)[0], self.network.v_dim]))
             # z_, v_ = self.network([z, v], is_backward=(tf.random_uniform([]) < 0.5))
             z_, v_ = tf.scan(nice_proposal, x * tf.random_uniform([]), (z, v), back_prop=False)
+            #print(tf.shape(z_),tf.shape(v_))
             z_, v_ = z_[-1], v_[-1]
             ep = hamiltonian(z, v, self.energy_fn)
             en = hamiltonian(z_, v_, self.energy_fn)
