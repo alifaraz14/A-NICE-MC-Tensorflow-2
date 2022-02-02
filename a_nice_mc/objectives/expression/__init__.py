@@ -35,7 +35,9 @@ class Expression(Energy):
         z, v = zv
         logger.info('Acceptance rate %.4f' % (acceptance_rate(z)))
         z = self.statistics(z)
-        ess = effective_sample_size(z, self.mean(), self.std() * self.std(), logger=logger)
+        mean_val = np.mean(z)
+        std_val = np.std(z)
+        ess = effective_sample_size(z, mean_val, std_val * std_val, logger=logger)
         if path:
             save_ess(ess, path)
         self.visualize(zv, path)

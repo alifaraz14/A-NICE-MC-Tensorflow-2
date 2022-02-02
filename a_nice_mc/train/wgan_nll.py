@@ -1,9 +1,9 @@
 import os
 import time
 
+import tensorflow as tf
 import numpy as np
-import tensorflow.compat.v1 as tf
-tf.disable_v2_behavior()
+from tensorflow.keras import optimizers
 from a_nice_mc.utils.bootstrap import Buffer
 from a_nice_mc.utils.logger import create_logger
 from a_nice_mc.utils.nice import TrainingOperator, InferenceOperator
@@ -20,45 +20,53 @@ class Trainer(object):
     I didn't see too much of an improvement over cross entropy loss.
     """
     def __init__(self,
-                 network, energy_fn, discriminator,
-                 noise_sampler,
+                 network, energy_fn, discriminator, noise_sampler,
                  b, m, eta=1.0, scale=10.0):
         self.energy_fn = energy_fn
+        self.discriminator = discriminator
+        self.ns = noise_sampler
+        self.ds = None
+        self.path = 'logs/' + energy_fn.name
+        try:
+            os.makedirs(self.path)
+        except OSError:
+            pass
         self.logger = create_logger(__name__)
         self.train_op = TrainingOperator(network)
         self.infer_op = InferenceOperator(network, energy_fn)
-        self.b = tf.to_int32(tf.reshape(tf.multinomial(tf.ones([1, b]), 1), [])) + 1
-        self.m = tf.to_int32(tf.reshape(tf.multinomial(tf.ones([1, m]), 1), [])) + 1
+        logits_b = tf.math.log(tf.ones([1, b]))
+        logits_m = tf.math.log(tf.ones([1, m]))
+        self.b = tf.cast(tf.reshape(tf.random.categorical(logits_b, 1), []), tf.int32) + 1
+        self.m = tf.cast(tf.reshape(tf.random.categorical(logits_m, 1), []), tf.int32) + 1
         self.network = network
         self.hmc_sampler = None
         self.x_dim, self.v_dim = network.x_dim, network.v_dim
+        #self.x_dim, self.v_dim = 2, 2
+        self.eta = eta
+        self.scale = scale
 
-
-        self.z = tf.placeholder(tf.float32, [None, self.x_dim])
-        self.x = tf.placeholder(tf.float32, [None, self.x_dim])
-        self.xl = tf.placeholder(tf.float32, [None, self.x_dim])
-        self.steps = tf.placeholder(tf.int32, [])
-        self.nice_steps = tf.placeholder(tf.int32, [])
-        bx, bz = tf.shape(self.x)[0], tf.shape(self.z)[0]
-
+    @tf.function
+    def inference_op(self, bz, z):
         # Obtain values from inference ops
         # `infer_op` contains Metropolis step
-        v = tf.random_normal(tf.stack([bz, self.v_dim]))
-        self.z_, self.v_ = self.infer_op((self.z, v), self.steps, self.nice_steps)
+        v = tf.random.normal(tf.stack([bz, self.v_dim]))
+        z_, v_ = self.infer_op((z, v), self.steps, self.nice_steps)
+        return z_, v_
 
+    @tf.function
+    def training_operations_graph(self, x, z):
         # Reshape for pairwise discriminator
-        x = tf.reshape(self.x, [-1, 2 * self.x_dim])
-        xl = tf.reshape(self.xl, [-1, 2 * self.x_dim])
-
+        x_dash = tf.reshape(x, [-1, 2 * self.x_dim])
+        bx, bz = tf.shape(x)[0], tf.shape(z)[0] 
         # Obtain values from train ops
-        v1 = tf.random_normal(tf.stack([bz, self.v_dim]))
-        x1_, v1_ = self.train_op((self.z, v1), self.b)
+        v1 = tf.random.normal(tf.stack([bz, self.v_dim]))
+        x1_, v1_ = self.train_op((z, v1), self.b)
         x1_ = x1_[-1]
         x1_sg = tf.stop_gradient(x1_)
-        v2 = tf.random_normal(tf.stack([bx, self.v_dim]))
-        x2_, v2_ = self.train_op((self.x, v2), self.m)
+        v2 = tf.random.normal(tf.stack([bx, self.v_dim]))
+        x2_, v2_ = self.train_op((x, v2), self.m)
         x2_ = x2_[-1]
-        v3 = tf.random_normal(tf.stack([bx, self.v_dim]))
+        v3 = tf.random.normal(tf.stack([bx, self.v_dim]))
         x3_, v3_ = self.train_op((x1_sg, v3), self.m)
         x3_ = x3_[-1]
 
@@ -69,7 +77,7 @@ class Trainer(object):
         # The optimal case is achieved when x1, x2, x3
         # are all from the data distribution
         x_ = tf.concat([
-                tf.concat([x2_, self.x], 1),
+                tf.concat([x2_, x], 1),
                 tf.concat([x3_, x1_], 1)
         ], 0)
 
@@ -80,70 +88,61 @@ class Trainer(object):
         v_ = tf.concat([v1_, v2_, v3_], 0)
         v_ = tf.reshape(v_, [-1, self.v_dim])
 
-        d = discriminator(x, reuse=False)
-        d_ = discriminator(x_)
+        d = self.discriminator(x_dash)
+        d_ = self.discriminator(x_)
 
+        return d, d_, x_, v_
+
+    @tf.function
+    def another_graph(self, xl, x_):
+        xl = tf.reshape(xl, [-1, 2 * self.x_dim])
+        epsilon = tf.random.uniform([], 0.0, 1.0)
+        x_hat = xl * epsilon + x_ * (1 - epsilon)
+        with tf.GradientTape() as tape:
+            tape.watch(x_hat)
+            d_hat = self.discriminator(x_hat)
+        ddx = tape.gradient(d_hat, x_hat)
+        ddx = tf.norm(ddx, axis=1)
+        ddx = tf.reduce_mean(tf.square(ddx - 1.0) * self.scale)
+        return ddx
+
+    @tf.function
+    def loss_calculator(self, x, z, xl):
+        d, d_, x_, v_ = self.training_operations_graph(x, z)
         # generator loss
-
         # TODO: MMD loss (http://szhao.me/2017/06/10/a-tutorial-on-mmd-variational-autoencoders.html)
         # it is easy to implement, but maybe we should wait after this codebase is settled.
-        self.v_loss = tf.reduce_mean(0.5 * tf.multiply(v_, v_))
-        self.g_loss = tf.reduce_mean(d_) + self.v_loss * eta
+        v_loss = tf.reduce_mean(0.5 * tf.multiply(v_, v_))
+        g_loss = tf.reduce_mean(d_) + v_loss * self.eta
 
         # discriminator loss
-        self.d_loss = tf.reduce_mean(d) - tf.reduce_mean(d_)
+        d_loss = tf.reduce_mean(d) - tf.reduce_mean(d_)
+        ddx = self.another_graph(xl, x_)
+        d_loss = d_loss + ddx
+        return d_loss, g_loss, v_loss
 
-        epsilon = tf.random_uniform([], 0.0, 1.0)
-        x_hat = xl * epsilon + x_ * (1 - epsilon)
-        d_hat = discriminator(x_hat)
-        ddx = tf.gradients(d_hat, x_hat)[0]
-        ddx = tf.norm(ddx, axis=1)
-        ddx = tf.reduce_mean(tf.square(ddx - 1.0) * scale)
-        self.d_loss = self.d_loss + ddx
+        # gpu_options = tf.GPUOptions(allow_growth=True)
+        # self.sess = tf.Session(config=tf.ConfigProto(
+        #     inter_op_parallelism_threads=1,
+        #     intra_op_parallelism_threads=1,
+        #     gpu_options=gpu_options,
+        # ))
 
-        # I don't have a good solution to the tf variable scope mess.
-        # So I basically force the NiceLayer to contain the 'generator' scope.
-        # See `nice/__init__.py`.
-        g_vars = [var for var in tf.global_variables() if 'generator' in var.name]
-        d_vars = [var for var in tf.global_variables() if discriminator.name in var.name]
-
-        self.d_train = tf.train.AdamOptimizer(learning_rate=5e-4, beta1=0.5, beta2=0.9)\
-            .minimize(self.d_loss, var_list=d_vars)
-        self.g_train = tf.train.AdamOptimizer(learning_rate=5e-4, beta1=0.5, beta2=0.9)\
-            .minimize(self.g_loss, var_list=g_vars)
-
-        self.init_op = tf.group(
-            tf.global_variables_initializer(),
-            tf.local_variables_initializer()
-        )
-
-        gpu_options = tf.GPUOptions(allow_growth=True)
-        self.sess = tf.Session(config=tf.ConfigProto(
-            inter_op_parallelism_threads=1,
-            intra_op_parallelism_threads=1,
-            gpu_options=gpu_options,
-        ))
-
-        self.sess.run(self.init_op)
-        self.ns = noise_sampler
-        self.ds = None
-        self.path = 'logs/' + energy_fn.name
-        try:
-            os.makedirs(self.path)
-        except OSError:
-            pass
-
-
-
+    #@tf.function
     def sample(self, steps=2000, nice_steps=1, batch_size=32):
+        z = self.ns(batch_size)
+        self.steps = steps
+        self.nice_steps = nice_steps
+        bz = tf.shape(z)[0]
+
         start = time.time()
-        z, v = self.sess.run([self.z_, self.v_], feed_dict={
-            self.z: self.ns(batch_size), self.steps: steps, self.nice_steps: nice_steps})
+        z, v = self.inference_op(bz, z)
         end = time.time()
+
         self.logger.info('A-NICE-MC: batches [%d] steps [%d : %d] time [%5.4f] samples/s [%5.4f]' %
                          (batch_size, steps, nice_steps, end - start, (batch_size * steps) / (end - start)))
-        z = np.transpose(z, axes=[1, 0, 2])
-        v = np.transpose(v, axes=[1, 0, 2])
+        z = np.transpose(z, [1, 0, 2])
+        v = np.transpose(v, [1, 0, 2])
         return z, v
 
     def bootstrap(self, steps=5000, nice_steps=1, burn_in=1000, batch_size=32,
@@ -153,8 +152,7 @@ class Trainer(object):
 
             if not self.hmc_sampler:
                 self.hmc_sampler = HmcSampler(self.energy_fn,
-                                              lambda bs: np.random.randn(bs, self.x_dim),
-                                              sess=self.sess)
+                                            lambda bs: tf.random.normal([bs, self.x_dim]))
 
             z = self.hmc_sampler.sample(steps, batch_size)
         else:
@@ -165,16 +163,48 @@ class Trainer(object):
             self.ds.insert(z)
         else:
             self.ds = Buffer(z)
-
-    def train(self,
-              d_iters=5, epoch_size=500, log_freq=100, max_iters=100000,
+    
+    @tf.function
+    def disc_training_step(self, x, z, xl):
+        with tf.GradientTape() as tape:
+            d_loss, g_loss, v_loss = self.loss_calculator(x, z, xl)
+        #discriminator_variables = tape.watched_variables()[12:]
+        #discriminator_variables = self.discriminator.nn.trainable_variables
+        discriminator_gradients = tape.gradient(d_loss, self.discriminator.nn.trainable_variables)
+        self.optimizer.apply_gradients(zip(discriminator_gradients, self.discriminator.nn.trainable_variables))
+    
+    @tf.function
+    def gen_training_step(self, x, z, xl):    
+        with tf.GradientTape() as tape:
+            d_loss, g_loss, v_loss = self.loss_calculator(x, z, xl)
+        #generator_variables = tape.watched_variables()[:12]           
+        # generator_gradients = tape.gradient(g_loss, {self.network.layers[0].nn.trainable_variables,
+        #                                              self.network.layers[1].nn.trainable_variables,
+        #                                              self.network.layers[2].nn.trainable_variables
+        #                                             }
+        #                                     )           
+        # optimizer.apply_gradients(zip(generator_gradients, {self.network.layers[0].nn.trainable_variables,
+        #                                                     self.network.layers[1].nn.trainable_variables,
+        #                                                     self.network.layers[2].nn.trainable_variables
+        #                                                    }  
+        #                             )
+        #                         )
+        generator_gradients = tape.gradient(g_loss, tape.watched_variables()[:12])
+        self.optimizer.apply_gradients(zip(generator_gradients, tape.watched_variables()[:12]))
+    
+    #@tf.function
+    def train(self, d_iters = 5,
+              epoch_size=500, log_freq=100, max_iters=100000,
+              #epoch_size=500, log_freq=5, max_iters=100000,
               bootstrap_steps=5000, bootstrap_burn_in=1000,
+              #bootstrap_steps=50, bootstrap_burn_in=10,
               bootstrap_batch_size=32, bootstrap_discard_ratio=0.5,
               evaluate_steps=5000, evaluate_burn_in=1000, evaluate_batch_size=32, nice_steps=1,
+              #evaluate_steps=50, evaluate_burn_in=10, evaluate_batch_size=32, nice_steps=1,
               hmc_epochs=1):
         """
         Train the NICE proposal using adversarial training.
-        :param d_iters: number of discrtiminator iterations for each generator iteration
+        :param d_iters: number of discriminator iterations for each generator iteration
         :param epoch_size: how many iteration for each bootstrap step
         :param log_freq: how many iterations for each log on screen
         :param max_iters: max number of iterations for training
@@ -190,13 +220,14 @@ class Trainer(object):
         :param hmc_epochs: number of epochs to bootstrap off HMC rather than NICE proposal
         :return:
         """
-        def _feed_dict(bs):
-            return {self.z: self.ns(bs), self.x: self.ds(bs), self.xl: self.ds(4 * bs)}
+        # def _feed_dict(bs):
+        #     return {self.z: self.ns(bs), self.x: self.ds(bs), self.xl: self.ds(4 * bs)}
 
         batch_size = 32
         train_time = 0
         num_epochs = 0
         use_hmc = True
+        self.optimizer = optimizers.Adam(learning_rate = 5e-4, beta_1 = 0.5, beta_2 = 0.9)
         for t in range(0, max_iters):
             if t % epoch_size == 0:
                 num_epochs += 1
@@ -212,14 +243,16 @@ class Trainer(object):
                 self.energy_fn.evaluate([z, v], path=self.path)
                 # TODO: save model
             if t % log_freq == 0:
-                d_loss = self.sess.run(self.d_loss, feed_dict=_feed_dict(batch_size))
-                g_loss, v_loss = self.sess.run([self.g_loss, self.v_loss], feed_dict=_feed_dict(batch_size))
+                x, z, xl = self.ds(batch_size), self.ns(batch_size), self.ds(4*batch_size)
+                d_loss, g_loss, v_loss = self.loss_calculator(x, z, xl)
                 self.logger.info('Iter [%d] time [%5.4f] d_loss [%.4f] g_loss [%.4f] v_loss [%.4f]' %
                                  (t, train_time, d_loss, g_loss, v_loss))
             start = time.time()
-            for _ in range(0, d_iters):
-                self.sess.run(self.d_train, feed_dict=_feed_dict(batch_size))
-            self.sess.run(self.g_train, feed_dict=_feed_dict(batch_size))
+            for _ in range(d_iters):
+                x, z, xl = self.ds(batch_size), self.ns(batch_size), self.ds(4*batch_size)
+                self.disc_training_step(x, z, xl)
+            x, z, xl = self.ds(batch_size), self.ns(batch_size), self.ds(4*batch_size)
+            self.gen_training_step(x, z, xl)
             end = time.time()
             train_time += end - start
 
